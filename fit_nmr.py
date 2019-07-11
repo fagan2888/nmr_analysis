@@ -299,19 +299,60 @@ class ProbabilityModel(object):
         self.aicc = self.aic + (2 * len(x0)**2 + 2 * len(x0)) / (len(errors) - len(x0) - 1)
         return self
 
-    def get_log_likelihood(errors, variances=None):
+    def get_log_likelihood(self, labels, predictions, variances=None):
         """
         Get the log-likelihood of some prediction errors and optionally variances
         """
-        #TODO
-        quit()
+        if self.params is None:
+            raise SystemExit("Model has not been fitted")
+        if variances is None and self._variances_fitted is not None:
+            raise SystemExit("Variances has to be fitted to be able to used to get log-likelihood")
+        elif variances is not None and self._variances_fitted is None:
+            raise SystemExit("Variances was fitted, so is also needed to get log-likelihood")
+
+        if self.scaling:
+            errors = labels - self.params[-1] * predictions
+            end = -1
+        else:
+            errors = labels - predictions
+            end = len(self.params)+1
+
+        if self.distribution == "t":
+            if self._variances_fitted:
+                loc, log_a, b, log_df = self.params[:end]
+                a = np.exp(log_a)
+                df = np.exp(log_df)
+                return sum(self._log_probability(error, scale=a*variance**b, df=df, loc=loc) for (error, variance) \
+                        in zip(errors, variances))
+            else:
+                loc, log_scale, log_df = self.params[:end]
+                scale = np.exp(log_scale)
+                df = np.exp(log_df)
+                return sum(self._log_probability(error, scale=scale, df=df, loc=loc) for (error, variance) \
+                        in zip(errors, variances))
+        else:
+            if self._variances_fitted:
+                loc, log_a, b = self.params[:end]
+                a = np.exp(log_a)
+                return sum(self._log_probability(error, scale=a*variance**b, loc=loc) for (error, variance) \
+                        in zip(errors, variances))
+            else:
+                loc, log_scale = self.params[:end]
+                scale = np.exp(log_scale)
+                return sum(self._log_probability(error, scale=scale, loc=loc) for (error, variance) \
+                        in zip(errors, variances))
 
 
 if __name__ == "__main__":
     labels, predictions, variances = read_nmr("__JUL03___SYG_exp_1JCH_raw.txt")
+    print(np.median(labels-predictions))
     P = ProbabilityModel(distribution='laplace', scaling=False)
     P.fit(labels, predictions, variances)
-    print(P.params, P.bic, P.aicc)
+    str_labels, str_predictions, str_variances = read_nmr("STR_J1CH_test_raw.txt", -1, concatenate=False)
+    print(np.median(str_labels[1]-str_predictions[1]))
+    ll = P.get_log_likelihood(str_labels[1], str_predictions[1], str_variances[1])
+    print(P.params, P.bic, P.aicc, ll)
+    quit()
     labels, predictions, variances = read_nmr("__JUL03___CD_exp_CCS_raw.txt", -1)
     P = ProbabilityModel(distribution='laplace', scaling=True)
     P.fit(labels, predictions, variances)
