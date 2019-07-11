@@ -4,10 +4,10 @@ import scipy.stats
 import scipy.optimize
 import scipy.special
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 
-# TODO get labels and predictions
-def read_nmr(filename, col=0):
+def read_nmr(filename, col=0, concatenate=True):
     # Parse
     with open(filename) as f:
         lines = f.readlines()
@@ -35,10 +35,13 @@ def read_nmr(filename, col=0):
     sorted_mols = sorted(data.keys())
 
     # Average duplicates
-    unique_labels = []
-    unique_predictions = []
-    unique_variances = []
+    unique_labels = {}
+    unique_predictions = {}
+    unique_variances = {}
     for mol in sorted_mols:
+        unique_labels[mol] = []
+        unique_predictions[mol] = []
+        unique_variances[mol] = []
         sorted_idx = np.argsort(data[mol]["labels"])
         labels = np.asarray(data[mol]["labels"])[sorted_idx]
         predictions = np.asarray(data[mol]["predictions"])[sorted_idx]
@@ -55,17 +58,29 @@ def read_nmr(filename, col=0):
             if i + 1 < len(labels) and label == labels[i+1]:# and 0 == 1:
                 continue
 
-            unique_labels.append(this_label / c)
-            unique_predictions.append(this_prediction / c)
-            unique_variances.append(this_variance / c)
+            unique_labels[mol].append(this_label / c)
+            unique_predictions[mol].append(this_prediction / c)
+            unique_variances[mol].append(this_variance / c)
             c = 0
             this_label = 0
             this_prediction = 0
             this_variance = 0
 
-    return np.asarray(unique_labels), np.asarray(unique_predictions), np.asarray(unique_variances)
 
-def ProbabilityModel(object):
+    if concatenate:
+        return np.asarray(sum(unique_labels.values(), [])), \
+                np.asarray(sum(unique_predictions.values(), [])), \
+                np.asarray(sum(unique_variances.values(), []))
+
+    # Convert to numpy arrays
+    for mol in unique_labels.keys():
+        unique_labels[mol] = np.asarray(unique_labels[mol])
+        unique_predictions[mol] = np.asarray(unique_predictions[mol])
+        unique_variances[mol] = np.asarray(unique_variances[mol])
+
+    return unique_labels, unique_predictions, unique_variances
+
+class ProbabilityModel(object):
     """
     Class to handle fitting probability distributions
     """
@@ -78,6 +93,8 @@ def ProbabilityModel(object):
         self.params = None
         self._variances_fitted = None
         self.bic = None
+        self.aicc = None
+        self.aic = None
 
     def _log_probability(self, x=None, scale=None, loc=None, df=None):
         if self.distribution == "cauchy":
@@ -90,95 +107,196 @@ def ProbabilityModel(object):
             log_p = np.log(scipy.special.gamma((df+1)/2) / (scipy.special.gamma(df/2)*np.sqrt(np.pi*df)*scale)) - (df+1)/2 * np.log(1+((x-loc)/scale)**2 / df)
         return log_p
 
-    def _loss_function(self, x, errors, variances=None):
+    def _loss_function(self, x, labels, predictions, variances=None):
         """
         Loss function for the optimization step
         """
 
-        n = len(errors)
+        n = len(labels)
         loc = x[0]
-        if self._fitted_variances:
+        if self._variances_fitted:
             a = np.exp(x[1])
-            b = np.exp(x[2])
+            b = x[2]
         else:
             scale = np.exp(x[1])
         if self.distribution == "t":
-            df = np.exp(x[3 - int(self._fitted_variances)])
+            df = np.exp(x[2 + int(self._variances_fitted)])
         else:
             df = None
         if self.scaling:
-            kappa = x[-1]
+            slope = x[-1]
         else:
-            kappa = 1
+            slope = 1
 
         negative_log_likelihood = 0
         for i in range(n):
-            if self.fitted_variances:
+            if self._variances_fitted:
                 scale = a * variances[i]**b
-            error = kappa * errors[i]
-            negative_log_likelihood -= log_probability(errors[i], scale, loc, df)
+            error = labels[i] - slope * predictions[i]
+            negative_log_likelihood -= self._log_probability(error, scale, loc, df)
 
-        bic = np.log(n) * len(x) + 2 * negative_log_likelihood
-        return bic
+        return negative_log_likelihood
 
     def fit(self, labels, predictions, variances=None):
         """
         Fit probability distributions to the errors, optionally utilizing individual variances
         and fitting the scale parameter to follow a power-law
         """
-        errors = labels - predictions
 
         self._variances_fitted = True
         if variances is None:
             self._variances_fitted = False
 
         if self.scaling:
-            slope, intercept = scipy.stats.linregress(labels, predictions)[:2]
+            slope, intercept = scipy.stats.linregress(predictions, labels)[:2]
 
+        # Just make some good initial guesses, since the likelihood might not be convex
         if self.distribution == "normal":
-            loc = np.mean(errors)
-            log_scale = np.log(np.std(errors))
-            if not self._variances_fitted:
-                if self.scaling:
-                    x0 = [loc, log_scale]
-                else:
-                    self.params = (loc, log_scale)
-                    return
-            x0 = [loc, log_scale, 0]
-        elif self.distribution in ["cauchy", "t"]:
-            sorted_errors = np.sort(errors)
-            n = sorted_errors.size
-            # 24% mid to do estimates
-            start = int(0.38 * n+ 1 )
-            end = int(0.62 * n + 1)
-            loc = np.mean(sorted_errors[start:mean])
-            # half the interquartile range as estimator of scale
-            log_scale = np.log((np.percentile(sorted_errors, 75) - np.percentile(sorted_errors,25)) / 2)
             if self._variances_fitted:
-                x0 = [loc, log_scale, 0]
-            else:
-                x0 = [loc, log_scale]
-            if self.distribution == "t":
-                x0.append(2)
-        elif self.distribution == "laplace":
-            loc = np.median(errors)
-            log_scale = np.log(np.mean(abs(errors - loc)))
-            if not self._variances_fitted:
                 if self.scaling:
-                    x0 = [loc, log_scale]
+                    errors = labels - slope * predictions - intercept
+                    # [loc, a, b, slope]
+                    x0 = [intercept, np.log(np.std(errors)), 0, slope]
                 else:
-                    self.params = (loc, log_scale)
-                    return
-            x0 = [loc, log_scale, 0]
+                    errors = labels - predictions
+                    # [loc, a, b]
+                    x0 = [np.mean(errors), np.log(np.std(errors)), 0]
+            else:
+                if self.scaling:
+                    errors = labels - slope * predictions - intercept
+                    # [loc, log_scale, slope]
+                    x0 = [intercept, np.log(np.std(errors)), 1]
+                else:
+                    errors = labels - predictions
+                    # [loc, log_scale]
+                    x0 = [np.mean(errors), np.log(np.std(errors))]
+        elif self.distribution == "cauchy":
+            if self._variances_fitted:
+                if self.scaling:
+                    errors = labels - slope*predictions - intercept
+                    sorted_errors = np.sort(errors)
+                    n = sorted_errors.size
+                    # 24% mid to do estimates
+                    start = int(0.38 * n+ 1 )
+                    end = int(0.62 * n + 1)
+                    loc = np.mean(sorted_errors[start:end])
+                    # half the interquartile range as estimator of scale
+                    log_scale = np.log((np.percentile(sorted_errors, 75) - np.percentile(sorted_errors,25)) / 2)
+                    # [loc, a, b, slope]
+                    x0 = [intercept + loc, log_scale, 0, slope]
+                else:
+                    errors = labels -predictions 
+                    sorted_errors = np.sort(errors)
+                    n = sorted_errors.size
+                    # 24% mid to do estimates
+                    start = int(0.38 * n+ 1 )
+                    end = int(0.62 * n + 1)
+                    loc = np.mean(sorted_errors[start:end])
+                    # half the interquartile range as estimator of scale
+                    log_scale = np.log((np.percentile(sorted_errors, 75) - np.percentile(sorted_errors,25)) / 2)
+                    # [loc, a, b]
+                    x0 = [loc, log_scale, 0]
+            else:
+                if self.scaling:
+                    errors = labels - slope*predictions - intercept
+                    sorted_errors = np.sort(errors)
+                    n = sorted_errors.size
+                    # 24% mid to do estimates
+                    start = int(0.38 * n+ 1 )
+                    end = int(0.62 * n + 1)
+                    loc = np.mean(sorted_errors[start:end])
+                    # half the interquartile range as estimator of scale
+                    log_scale = np.log((np.percentile(sorted_errors, 75) - np.percentile(sorted_errors,25)) / 2)
+                    # [loc, log_scale, slope]
+                    x0 = [intercept + loc, log_scale, slope]
+                else:
+                    errors = labels -predictions 
+                    sorted_errors = np.sort(errors)
+                    n = sorted_errors.size
+                    # 24% mid to do estimates
+                    start = int(0.38 * n+ 1 )
+                    end = int(0.62 * n + 1)
+                    loc = np.mean(sorted_errors[start:end])
+                    # half the interquartile range as estimator of scale
+                    log_scale = np.log((np.percentile(sorted_errors, 75) - np.percentile(sorted_errors,25)) / 2)
+                    # [loc, log_scale]
+                    x0 = [loc, log_scale]
+        elif self.distribution == "t":
+            if self._variances_fitted:
+                if self.scaling:
+                    errors = labels - slope*predictions - intercept
+                    sorted_errors = np.sort(errors)
+                    n = sorted_errors.size
+                    # 24% mid to do estimates
+                    start = int(0.38 * n+ 1 )
+                    end = int(0.62 * n + 1)
+                    loc = np.mean(sorted_errors[start:end])
+                    # half the interquartile range as estimator of scale
+                    log_scale = np.log((np.percentile(sorted_errors, 75) - np.percentile(sorted_errors,25)) / 2)
+                    # [loc, a, b, log_df, slope]
+                    x0 = [intercept + loc, log_scale, 0, 1, slope]
+                else:
+                    errors = labels -predictions 
+                    sorted_errors = np.sort(errors)
+                    n = sorted_errors.size
+                    # 24% mid to do estimates
+                    start = int(0.38 * n+ 1 )
+                    end = int(0.62 * n + 1)
+                    loc = np.mean(sorted_errors[start:end])
+                    # half the interquartile range as estimator of scale
+                    log_scale = np.log((np.percentile(sorted_errors, 75) - np.percentile(sorted_errors,25)) / 2)
+                    # [loc, a, b, log_df]
+                    x0 = [loc, log_scale, 0, 1]
+            else:
+                if self.scaling:
+                    errors = labels - slope*predictions - intercept
+                    sorted_errors = np.sort(errors)
+                    n = sorted_errors.size
+                    # 24% mid to do estimates
+                    start = int(0.38 * n+ 1 )
+                    end = int(0.62 * n + 1)
+                    loc = np.mean(sorted_errors[start:end])
+                    # half the interquartile range as estimator of scale
+                    log_scale = np.log((np.percentile(sorted_errors, 75) - np.percentile(sorted_errors,25)) / 2)
+                    # [loc, log_scale, log_df, slope]
+                    x0 = [intercept + loc, log_scale, 1, slope]
+                else:
+                    errors = labels -predictions 
+                    sorted_errors = np.sort(errors)
+                    n = sorted_errors.size
+                    # 24% mid to do estimates
+                    start = int(0.38 * n+ 1 )
+                    end = int(0.62 * n + 1)
+                    loc = np.mean(sorted_errors[start:end])
+                    # half the interquartile range as estimator of scale
+                    log_scale = np.log((np.percentile(sorted_errors, 75) - np.percentile(sorted_errors,25)) / 2)
+                    # [loc, log_scale, log_df]
+                    x0 = [loc, log_scale, 1]
+        elif self.distribution == "laplace":
+            if self._variances_fitted:
+                if self.scaling:
+                    errors = labels - slope * predictions - intercept
+                    # [loc, a, b, slope]
+                    x0 = [intercept, np.log(np.mean(abs(errors))), 0, slope]
+                else:
+                    errors = labels - predictions
+                    # [loc, a, b]
+                    x0 = [np.median(errors), np.log(np.mean(abs(errors))), 0]
+            else:
+                if self.scaling:
+                    errors = labels - slope * predictions - intercept
+                    # [loc, log_scale, slope]
+                    x0 = [intercept, np.log(np.mean(abs(errors))), 1]
+                else:
+                    errors = labels - predictions
+                    # [loc, log_scale]
+                    x0 = [np.median(errors), np.log(np.mean(abs(errors)))]
 
-        if self.scaling:
-            x0.append(slope)
-            print(x0[0], intercept)
-            quit()
-
-        res = scipy.optimize.minimize(self._loss_function, x0, args=(errors, variances), method="bfgs")
+        res = scipy.optimize.minimize(self._loss_function, x0, args=(labels, predictions, variances), method="bfgs")
         self.params = res.x
-        self.bic = res.fun
+        self.bic = np.log(len(errors)) * len(x0) + 2 * res.fun
+        self.aic = 2 * len(x0) + 2 * res.fun
+        self.aicc = self.aic + (2 * len(x0)**2 + 2 * len(x0)) / (len(errors) - len(x0) - 1)
         return self
 
     def get_log_likelihood(errors, variances=None):
@@ -191,11 +309,15 @@ def ProbabilityModel(object):
 
 if __name__ == "__main__":
     labels, predictions, variances = read_nmr("__JUL03___SYG_exp_1JCH_raw.txt")
+    P = ProbabilityModel(distribution='laplace', scaling=False)
+    P.fit(labels, predictions, variances)
+    print(P.params, P.bic, P.aicc)
+    labels, predictions, variances = read_nmr("__JUL03___CD_exp_CCS_raw.txt", -1)
+    P = ProbabilityModel(distribution='laplace', scaling=True)
+    P.fit(labels, predictions, variances)
+    print(P.params, P.bic, P.aicc)
+    labels, predictions, variances = read_nmr("__JUL03___CD_exp_HCS_raw.txt", -1)
+    P = ProbabilityModel(distribution='laplace', scaling=True)
+    P.fit(labels, predictions, variances)
+    print(P.params, P.bic, P.aicc)
     quit()
-    fit(coupling_errors, coupling_variances, form="laplace")
-    fit2(coupling_errors, coupling_variances, form="laplace")
-    fitt(coupling_errors, coupling_variances)
-    shift_errors, shift_variances = read_nmr("__JUL03___CD_exp_CCS_raw.txt", -1)
-    fit(shift_errors, shift_variances, form="laplace")
-    fit2(shift_errors, shift_variances, form="laplace")
-    fitt(shift_errors, shift_variances)
