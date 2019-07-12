@@ -6,8 +6,7 @@ import scipy.special
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-
-def read_nmr(filename, col=0, concatenate=True):
+def read_nmr(filename, col=0, concatenate=True, ignore_similar=True):
     # Parse
     with open(filename) as f:
         lines = f.readlines()
@@ -55,7 +54,7 @@ def read_nmr(filename, col=0, concatenate=True):
             this_prediction += prediction
             this_variance += variance
             c += 1
-            if i + 1 < len(labels) and label == labels[i+1]:# and 0 == 1:
+            if ignore_similar and i + 1 < len(labels) and label == labels[i+1]:# and 0 == 1:
                 continue
 
             unique_labels[mol].append(this_label / c)
@@ -342,16 +341,114 @@ class ProbabilityModel(object):
                 return sum(self._log_probability(error, scale=scale, loc=loc) for (error, variance) \
                         in zip(errors, variances))
 
+def mae(x):
+    """
+    Return MAE of data
+    """
+    return np.mean(abs(x))
+
+def rmse(x):
+    """
+    Return RMSE of data
+    """
+    return np.sqrt(np.mean(x**2))
+
+def maxe(x):
+    """
+    Return MaxE of data
+    """
+    return np.max(abs(x))
+
+def J1CH_results():
+    syg_exp, syg_ml, variances = read_nmr("__JUL07___SYG_exp_1JCH_raw.txt", ignore_similar=False)
+    syg_dft = read_nmr("__JUL07___SYG_dft_1JCH_raw.txt", ignore_similar=False)[0]
+
+    errors = syg_exp - 10.91 - syg_ml
+    print("*** MAE/RMSE/MaxE - Sygenta - ML to exp - 10.91 Hz offset - no variance filter ***")
+    print(mae(errors), rmse(errors), maxe(errors))
+    errors = (syg_exp - 10.91 - syg_ml)[variances < 10]
+    print("*** MAE/RMSE/MaxE - Sygenta - ML to exp - 10.91 Hz offset - 10 Hz variance filter ***")
+    print(mae(errors), rmse(errors), maxe(errors))
+    errors = (syg_exp - 10.91 - syg_ml)[variances < 5]
+    print("*** MAE/RMSE/MaxE - Sygenta - ML to exp - 10.91 Hz offset - 5 Hz variance filter ***")
+    print(mae(errors), rmse(errors), maxe(errors))
+
+    errors = syg_exp - 10.91 - syg_dft
+    print("*** MAE/RMSE/MaxE - Sygenta - DFT to exp - 10.91 Hz offset - no variance filter ***")
+    print(mae(errors), rmse(errors), maxe(errors))
+    errors = (syg_exp - 10.91 - syg_dft)[variances < 10]
+    print("*** MAE/RMSE/MaxE - Sygenta - DFT to exp - 10.91 Hz offset - 10 Hz variance filter ***")
+    print(mae(errors), rmse(errors), maxe(errors))
+    errors = (syg_exp - 10.91 - syg_dft)[variances < 5]
+    print("*** MAE/RMSE/MaxE - Sygenta - DFT to exp - 10.91 Hz offset - 5 Hz variance filter ***")
+    print(mae(errors), rmse(errors), maxe(errors))
+
+    str_dft, str_ml, str_variances = read_nmr("__JUL07___STRYCH_dft_1JCH_raw.txt", concatenate=False)
+    str_exp = read_nmr("STR_J1CH_val_raw.txt", -1, concatenate=False)[0]
+    print("*** MOL/MAE/RMSE/MaxE - Strychnine - ML to exp - 10.91 Hz offset - no variance filter ***")
+    for mol in str_dft.keys():
+        errors = str_exp[1] - 10.91 - str_ml[mol]
+        print(mol, mae(errors), rmse(errors), maxe(errors))
+    print("*** MOL/MAE/RMSE/MaxE - Strychnine - ML to exp - 10.91 Hz offset - 10 Hz variance filter ***")
+    for mol in str_dft.keys():
+        errors = (str_exp[1] - 10.91 - str_ml[mol])[str_variances < 10]
+        print(mol, mae(errors), rmse(errors), maxe(errors))
+    print("*** MOL/MAE/RMSE/MaxE - Strychnine - ML to exp - 10.91 Hz offset - 5 Hz variance filter ***")
+    for mol in str_dft.keys():
+        errors = (str_exp[1] - 10.91 - str_ml[mol])[str_variances < 5]
+        print(mol, mae(errors), rmse(errors), maxe(errors))
+
+    print("*** MOL/MAE/RMSE/MaxE - Strychnine - DFT to exp - 10.91 Hz offset - no variance filter ***")
+    for mol in str_dft.keys():
+        errors = str_exp[1] - 10.91 - str_dft[mol]
+        print(mol, mae(errors), rmse(errors), maxe(errors))
+    print("*** MOL/MAE/RMSE/MaxE - Strychnine - DFT to exp - 10.91 Hz offset - 10 Hz variance filter ***")
+    for mol in str_dft.keys():
+        errors = (str_exp[1] - 10.91 - str_dft[mol])[str_variances < 10]
+        print(mol, mae(errors), rmse(errors), maxe(errors))
+    print("*** MOL/MAE/RMSE/MaxE - Strychnine - DFT to exp - 10.91 Hz offset - 5 Hz variance filter ***")
+    for mol in str_dft.keys():
+        errors = (str_exp[1] - 10.91 - str_dft[mol])[str_variances < 5]
+        print(mol, mae(errors), rmse(errors), maxe(errors))
+
+    syg_exp, syg_ml, variances = read_nmr("__JUL07___SYG_exp_1JCH_raw.txt")
+    syg_dft = read_nmr("__JUL07___SYG_dft_1JCH_raw.txt")[0]
+    ml_model = ProbabilityModel(distribution='laplace', scaling=False)
+    ml_model.fit(syg_exp, syg_ml, variances)
+    dft_model = ProbabilityModel(distribution='laplace', scaling=False)
+    dft_model.fit(syg_exp, syg_dft)
+
+    # Print all the things
+    print("*** Parameters - Sygenta - ML to exp ***")
+    print(ml_model.params)
+    print("*** Parameters - Sygenta - DFT to exp ***")
+    print(dft_model.params)
+
+
+    ml_ll = []
+    print("*** mol/log-likelihood/ratio to 1 - Strychnine - ML to exp ***")
+    ll1 = ml_model.get_log_likelihood(str_exp[1], str_ml[1], str_variances[1])
+    for mol in str_dft.keys():
+        ll = ml_model.get_log_likelihood(str_exp[1], str_ml[mol], str_variances[mol])
+        ml_ll.append(ll)
+        print(mol, ll, np.exp(ll1-ll))
+
+    dft_ll = []
+    print("*** mol/log-likelihood/ratio to 1 - Strychnine - DFT to exp ***")
+    ll1 = ml_model.get_log_likelihood(str_exp[1], str_dft[1])
+    for mol in str_dft.keys():
+        ll = ml_model.get_log_likelihood(str_exp[1], str_dft[mol])
+        dft_ll.append(ll)
+        print(mol, ll, np.exp(ll1-ll))
+
+    return np.asarray(ml_ll), np.asarray(dft_ll)
+
 
 if __name__ == "__main__":
-    labels, predictions, variances = read_nmr("__JUL03___SYG_exp_1JCH_raw.txt")
-    print(np.median(labels-predictions))
-    P = ProbabilityModel(distribution='laplace', scaling=False)
-    P.fit(labels, predictions, variances)
-    str_labels, str_predictions, str_variances = read_nmr("STR_J1CH_test_raw.txt", -1, concatenate=False)
-    print(np.median(str_labels[1]-str_predictions[1]))
-    ll = P.get_log_likelihood(str_labels[1], str_predictions[1], str_variances[1])
-    print(P.params, P.bic, P.aicc, ll)
+    J1CH_results()
+    quit()
+    H1_results()
+    C13_results()
     quit()
     labels, predictions, variances = read_nmr("__JUL03___CD_exp_CCS_raw.txt", -1)
     P = ProbabilityModel(distribution='laplace', scaling=True)
@@ -362,3 +459,7 @@ if __name__ == "__main__":
     P.fit(labels, predictions, variances)
     print(P.params, P.bic, P.aicc)
     quit()
+
+
+
+
