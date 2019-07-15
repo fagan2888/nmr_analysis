@@ -6,78 +6,131 @@ import scipy.special
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-def read_nmr(filename, col=0, concatenate=True, ignore_similar=True):
-    # Parse
+def read_nmr(filename, atom1_col, value_col, atom2_col=None):
+    """
+    Parse column in data files
+    """
     with open(filename) as f:
         lines = f.readlines()
 
+
     data = {}
-    mols = []
-    labels = []
-    predictions = []
-    variances = []
     for line in lines[1:]:
         tokens = line.split()
         mol = int(tokens[0])
-        label = float(tokens[4+col])
-        prediction = float(tokens[5+col])
-        variance = float(tokens[6+col])
-        if mol not in data:
+        atom1 = int(tokens[atom1_col])
+        value = float(tokens[value_col])
+        if mol not in data: 
             data[mol] = {}
-            data[mol]["labels"] = []
-            data[mol]["predictions"] = []
-            data[mol]["variances"] = []
-        data[mol]["labels"].append(label)
-        data[mol]["predictions"].append(prediction)
-        data[mol]["variances"].append(variance)
+        if atom2_col is None:
+            if atom1 not in data[mol]: data[mol][atom1] = 0
+            data[mol][atom1] = value
+        else:
+            atom2 = int(tokens[atom2_col])
+            pair = (atom1, atom2)
+            if pair not in data[mol]: data[mol][pair] = 0
+            data[mol][pair] = value
+    return data
 
-    sorted_mols = sorted(data.keys())
+def concatenate(data):
+    """
+    Get all values from dicts of dicts of floats
+    """
+    def recursive_concatenate(x, concat_array=[]):
+        if isinstance(x, float):
+            concat_array.append(x)
+        else:
+            # dict
+            sorted_keys = sorted(list(x.keys()))
+            for i in sorted_keys:
+                recursive_concatenate(x[i], concat_array)
+        return concat_array
 
-    # Average duplicates
-    unique_labels = {}
-    unique_predictions = {}
-    unique_variances = {}
-    for mol in sorted_mols:
-        unique_labels[mol] = []
-        unique_predictions[mol] = []
-        unique_variances[mol] = []
-        sorted_idx = np.argsort(data[mol]["labels"])
-        labels = np.asarray(data[mol]["labels"])[sorted_idx]
-        predictions = np.asarray(data[mol]["predictions"])[sorted_idx]
-        variances = np.asarray(data[mol]["variances"])[sorted_idx]
-        c = 0
-        this_label = 0
-        this_prediction = 0
-        this_variance = 0
-        for i, (label, prediction, variance) in enumerate(zip(labels, predictions, variances)):
-            this_label += label
-            this_prediction += prediction
-            this_variance += variance
-            c += 1
-            if ignore_similar and i + 1 < len(labels) and label == labels[i+1]:# and 0 == 1:
+    return np.asarray(recursive_concatenate(data))
+
+def find_duplicates(data):
+    """
+    Find indices of duplicate entries (e.g. methyles)
+    """
+    duplicates = {}
+    for mol in data:
+        keys = np.asarray(list(data[mol].keys()))
+        labels = np.asarray(list(data[mol].values()))
+        sort_idx = np.argsort(labels)
+        sorted_labels = labels[sort_idx]
+        sorted_keys = keys[sort_idx]
+
+        duplicate_labels = []
+        c = -1
+        for i, label_i in enumerate(sorted_labels[:-1]):
+            if i < c:
                 continue
+            if isinstance(sorted_keys[i], int):
+                duplicate_labels_i = [sorted_keys[i]]
+            else:
+                duplicate_labels_i = [tuple(sorted_keys[i])]
+            for j, label_j in enumerate(sorted_labels[i+1:]):
+                c = j+i+1
+                if label_j > label_i:
+                    break
+                elif label_j < label_i:
+                    raise SystemExit("Should never get here")
+                else:
+                    if isinstance(sorted_keys[c], int):
+                        duplicate_labels_i.append(sorted_keys[c])
+                    else:
+                        duplicate_labels_i.append(tuple(sorted_keys[c]))
 
-            unique_labels[mol].append(this_label / c)
-            unique_predictions[mol].append(this_prediction / c)
-            unique_variances[mol].append(this_variance / c)
-            c = 0
-            this_label = 0
-            this_prediction = 0
-            this_variance = 0
+            if len(duplicate_labels_i) > 1:
+                duplicate_labels.append(duplicate_labels_i)
 
+        if len(duplicate_labels) > 0:
+            duplicates[mol] = duplicate_labels
+    return duplicates
 
-    if concatenate:
-        return np.asarray(sum(unique_labels.values(), [])), \
-                np.asarray(sum(unique_predictions.values(), [])), \
-                np.asarray(sum(unique_variances.values(), []))
+def remove_unique_entries(A,B):
+    """
+    Remove any entries that only exists in one of the data sets
+    """
+    A_common, B_common = {}, {}
+    common_keys = list(set(A.keys()) & set(B.keys()))
+    sorted_keys = sorted(common_keys)
+    for key in sorted_keys:
+        A_common[key] = {}
+        B_common[key] = {}
+        common_subkeys = list(set(A[key].keys()) & set(B[key].keys()))
+        sorted_subkeys = sorted(common_subkeys)
+        for subkey in sorted_subkeys:
+            A_common[key][subkey] = A[key][subkey]
+            B_common[key][subkey] = B[key][subkey]
+    return A_common, B_common
 
-    # Convert to numpy arrays
-    for mol in unique_labels.keys():
-        unique_labels[mol] = np.asarray(unique_labels[mol])
-        unique_predictions[mol] = np.asarray(unique_predictions[mol])
-        unique_variances[mol] = np.asarray(unique_variances[mol])
-
-    return unique_labels, unique_predictions, unique_variances
+def mean_duplicates(data, duplicates):
+    data_unique = {}
+    sorted_keys = sorted(list(data.keys()))
+    for mol in sorted_keys:
+        if mol in duplicates:
+            data_unique[mol] = {}
+            duplicate_keys = []
+            sorted_subkeys = sorted(list(data[mol].keys()))
+            for key1 in sorted_subkeys:
+                if key1 in duplicates[mol]:
+                    continue
+                for unique_keys in duplicates[mol]:
+                    if key1[0] == unique_keys[0][0] and key1[1] == unique_keys[0][1]:
+                        duplicate_keys.extend(unique_keys)
+                        label_sum = 0
+                        for key2 in unique_keys:
+                            label_sum += data[mol][key2]
+                        data_unique[mol][key1] = label_sum / len(unique_keys)
+                        break
+                # key1 not in duplicate keys, doesn't work
+                #if key1 not in duplicate_keys:
+                if sum((key1[0] == key2[0]) and (key1[1] == key2[1]) for key2 in duplicate_keys) == 0:
+                    data_unique[mol][key1] = data[mol][key1]
+        else:
+            data_unique[mol] = data[mol]
+    return data_unique
 
 class ProbabilityModel(object):
     """
@@ -142,6 +195,7 @@ class ProbabilityModel(object):
         and fitting the scale parameter to follow a power-law
         """
 
+        
         self._variances_fitted = True
         if variances is None:
             self._variances_fitted = False
@@ -304,9 +358,9 @@ class ProbabilityModel(object):
         """
         if self.params is None:
             raise SystemExit("Model has not been fitted")
-        if variances is None and self._variances_fitted is not None:
+        elif variances is None and self._variances_fitted:
             raise SystemExit("Variances has to be fitted to be able to used to get log-likelihood")
-        elif variances is not None and self._variances_fitted is None:
+        elif variances is not None and not self._variances_fitted:
             raise SystemExit("Variances was fitted, so is also needed to get log-likelihood")
 
         if self.scaling:
@@ -327,8 +381,7 @@ class ProbabilityModel(object):
                 loc, log_scale, log_df = self.params[:end]
                 scale = np.exp(log_scale)
                 df = np.exp(log_df)
-                return sum(self._log_probability(error, scale=scale, df=df, loc=loc) for (error, variance) \
-                        in zip(errors, variances))
+                return sum(self._log_probability(error, scale=scale, df=df, loc=loc) for error in errors)
         else:
             if self._variances_fitted:
                 loc, log_a, b = self.params[:end]
@@ -338,8 +391,7 @@ class ProbabilityModel(object):
             else:
                 loc, log_scale = self.params[:end]
                 scale = np.exp(log_scale)
-                return sum(self._log_probability(error, scale=scale, loc=loc) for (error, variance) \
-                        in zip(errors, variances))
+                return sum(self._log_probability(error, scale=scale, loc=loc) for error in errors)
 
 def mae(x):
     """
@@ -359,43 +411,96 @@ def maxe(x):
     """
     return np.max(abs(x))
 
+def transform_data(data_exp, data_dft, data_ml, data_var, return_dict=False):
+    """
+    Do all kinds of tedious transformations to get array of values
+    """
+    _, data_dft_truncated = remove_unique_entries(data_exp, data_dft)
+    _, data_ml_truncated = remove_unique_entries(data_exp, data_ml)
+    _, data_var_truncated = remove_unique_entries(data_exp, data_var)
+
+    data_exp_duplicates = find_duplicates(data_exp)
+
+    data_exp_unique = mean_duplicates(data_exp, data_exp_duplicates)
+    data_dft_unique = mean_duplicates(data_dft_truncated, data_exp_duplicates)
+    data_ml_unique = mean_duplicates(data_ml_truncated, data_exp_duplicates)
+    data_var_unique = mean_duplicates(data_var_truncated, data_exp_duplicates)
+
+    if return_dict:
+        for mol in data_exp_unique:
+            data_exp_unique[mol] = concatenate(data_exp_unique[mol])
+            data_dft_unique[mol] = concatenate(data_dft_unique[mol])
+            data_ml_unique[mol] = concatenate(data_ml_unique[mol])
+            data_var_unique[mol] = concatenate(data_var_unique[mol])
+        return data_exp_unique, data_dft_unique, data_ml_unique, data_var_unique
+
+    data_dft_ = concatenate(data_dft_unique)
+    data_ml_ = concatenate(data_ml_unique)
+    data_exp_ = concatenate(data_exp_unique)
+    data_var_ = concatenate(data_var_unique)
+
+    return data_exp_, data_dft_, data_ml_, data_var_
+
 def J1CH_results():
-    syg_exp, syg_ml, variances = read_nmr("__JUL07___SYG_exp_1JCH_raw.txt", ignore_similar=False)
-    syg_dft = read_nmr("__JUL07___SYG_dft_1JCH_raw.txt", ignore_similar=False)[0]
+    # Parsing data split up into more steps to make it easier to do changes
+    syg_exp = read_nmr("__JUL07___SYG_exp_1JCH_raw.txt", atom1_col=2, atom2_col=3, value_col=4)
+    syg_dft = read_nmr("__JUL07___SYG_dft_1JCH_raw.txt", atom1_col=2, atom2_col=3, value_col=4)
+    syg_ml = read_nmr("__JUL07___SYG_dft_1JCH_raw.txt", atom1_col=2, atom2_col=3, value_col=5)
+    syg_var = read_nmr("__JUL07___SYG_dft_1JCH_raw.txt", atom1_col=2, atom2_col=3, value_col=6)
+    # swapped atom1/atom2
+    str_exp = read_nmr("STR_J1CH_val_raw.txt",atom1_col=2, atom2_col=1, value_col=3)
+    str_dft = read_nmr("__JUL07___STRYCH_dft_1JCH_raw.txt", atom1_col=2, atom2_col=3, value_col=4)
+    str_ml = read_nmr("__JUL07___STRYCH_dft_1JCH_raw.txt", atom1_col=2, atom2_col=3, value_col=5)
+    str_var = read_nmr("__JUL07___STRYCH_dft_1JCH_raw.txt", atom1_col=2, atom2_col=3, value_col=6)
+
+    # make copies of entries for str_exp, since the experimental values doesn't change per diastereomer in this case
+    for mol in str_dft:
+        str_exp[mol] = str_exp[1]
+
+    syg_exp, syg_dft, syg_ml, syg_var = transform_data(syg_exp, syg_dft, syg_ml, syg_var)
+    str_exp, str_dft, str_ml, str_var = transform_data(str_exp, str_dft, str_ml, str_var, True)
+
+    print("*** MAE/RMSE/MaxE - Sygenta - ML to exp - 10.91 Hz offset - no variance filter ***")
+    errors = (syg_exp - 10.91 - syg_ml)
+    print(mae(errors), rmse(errors), maxe(errors))
+    errors = (syg_exp - 10.91 - syg_ml)[syg_var < 10]
+    print("*** MAE/RMSE/MaxE - Sygenta - ML to exp - 10.91 Hz offset - 10 Hz variance filter ***")
+    print(mae(errors), rmse(errors), maxe(errors))
+    errors = (syg_exp - 10.91 - syg_ml)[syg_var < 5]
+    print("*** MAE/RMSE/MaxE - Sygenta - ML to exp - 10.91 Hz offset - 5 Hz variance filter ***")
+    print(mae(errors), rmse(errors), maxe(errors))
 
     errors = syg_exp - 10.91 - syg_ml
     print("*** MAE/RMSE/MaxE - Sygenta - ML to exp - 10.91 Hz offset - no variance filter ***")
     print(mae(errors), rmse(errors), maxe(errors))
-    errors = (syg_exp - 10.91 - syg_ml)[variances < 10]
+    errors = (syg_exp - 10.91 - syg_ml)[syg_var < 10]
     print("*** MAE/RMSE/MaxE - Sygenta - ML to exp - 10.91 Hz offset - 10 Hz variance filter ***")
     print(mae(errors), rmse(errors), maxe(errors))
-    errors = (syg_exp - 10.91 - syg_ml)[variances < 5]
+    errors = (syg_exp - 10.91 - syg_ml)[syg_var < 5]
     print("*** MAE/RMSE/MaxE - Sygenta - ML to exp - 10.91 Hz offset - 5 Hz variance filter ***")
     print(mae(errors), rmse(errors), maxe(errors))
 
     errors = syg_exp - 10.91 - syg_dft
     print("*** MAE/RMSE/MaxE - Sygenta - DFT to exp - 10.91 Hz offset - no variance filter ***")
     print(mae(errors), rmse(errors), maxe(errors))
-    errors = (syg_exp - 10.91 - syg_dft)[variances < 10]
+    errors = (syg_exp - 10.91 - syg_dft)[syg_var < 10]
     print("*** MAE/RMSE/MaxE - Sygenta - DFT to exp - 10.91 Hz offset - 10 Hz variance filter ***")
     print(mae(errors), rmse(errors), maxe(errors))
-    errors = (syg_exp - 10.91 - syg_dft)[variances < 5]
+    errors = (syg_exp - 10.91 - syg_dft)[syg_var < 5]
     print("*** MAE/RMSE/MaxE - Sygenta - DFT to exp - 10.91 Hz offset - 5 Hz variance filter ***")
     print(mae(errors), rmse(errors), maxe(errors))
 
-    str_dft, str_ml, str_variances = read_nmr("__JUL07___STRYCH_dft_1JCH_raw.txt", concatenate=False)
-    str_exp = read_nmr("STR_J1CH_val_raw.txt", -1, concatenate=False)[0]
     print("*** MOL/MAE/RMSE/MaxE - Strychnine - ML to exp - 10.91 Hz offset - no variance filter ***")
     for mol in str_dft.keys():
         errors = str_exp[1] - 10.91 - str_ml[mol]
         print(mol, mae(errors), rmse(errors), maxe(errors))
     print("*** MOL/MAE/RMSE/MaxE - Strychnine - ML to exp - 10.91 Hz offset - 10 Hz variance filter ***")
     for mol in str_dft.keys():
-        errors = (str_exp[1] - 10.91 - str_ml[mol])[str_variances < 10]
+        errors = (str_exp[1] - 10.91 - str_ml[mol])[str_var[mol] < 10]
         print(mol, mae(errors), rmse(errors), maxe(errors))
     print("*** MOL/MAE/RMSE/MaxE - Strychnine - ML to exp - 10.91 Hz offset - 5 Hz variance filter ***")
     for mol in str_dft.keys():
-        errors = (str_exp[1] - 10.91 - str_ml[mol])[str_variances < 5]
+        errors = (str_exp[1] - 10.91 - str_ml[mol])[str_var[mol] < 5]
         print(mol, mae(errors), rmse(errors), maxe(errors))
 
     print("*** MOL/MAE/RMSE/MaxE - Strychnine - DFT to exp - 10.91 Hz offset - no variance filter ***")
@@ -404,17 +509,78 @@ def J1CH_results():
         print(mol, mae(errors), rmse(errors), maxe(errors))
     print("*** MOL/MAE/RMSE/MaxE - Strychnine - DFT to exp - 10.91 Hz offset - 10 Hz variance filter ***")
     for mol in str_dft.keys():
-        errors = (str_exp[1] - 10.91 - str_dft[mol])[str_variances < 10]
+        errors = (str_exp[1] - 10.91 - str_dft[mol])[str_var[mol] < 10]
         print(mol, mae(errors), rmse(errors), maxe(errors))
     print("*** MOL/MAE/RMSE/MaxE - Strychnine - DFT to exp - 10.91 Hz offset - 5 Hz variance filter ***")
     for mol in str_dft.keys():
-        errors = (str_exp[1] - 10.91 - str_dft[mol])[str_variances < 5]
+        errors = (str_exp[1] - 10.91 - str_dft[mol])[str_var[mol] < 5]
         print(mol, mae(errors), rmse(errors), maxe(errors))
 
-    syg_exp, syg_ml, variances = read_nmr("__JUL07___SYG_exp_1JCH_raw.txt")
-    syg_dft = read_nmr("__JUL07___SYG_dft_1JCH_raw.txt")[0]
+    print("*** MAE/RMSE/MaxE - Sygenta - ML to exp - 11 Hz offset - no variance filter ***")
+    errors = (syg_exp - 11 - syg_ml)
+    print(mae(errors), rmse(errors), maxe(errors))
+    errors = (syg_exp - 11 - syg_ml)[syg_var < 10]
+    print("*** MAE/RMSE/MaxE - Sygenta - ML to exp - 11 Hz offset - 10 Hz variance filter ***")
+    print(mae(errors), rmse(errors), maxe(errors))
+    errors = (syg_exp - 11 - syg_ml)[syg_var < 5]
+    print("*** MAE/RMSE/MaxE - Sygenta - ML to exp - 11 Hz offset - 5 Hz variance filter ***")
+    print(mae(errors), rmse(errors), maxe(errors))
+
+    errors = syg_exp - 11 - syg_ml
+    print("*** MAE/RMSE/MaxE - Sygenta - ML to exp - 11 Hz offset - no variance filter ***")
+    print(mae(errors), rmse(errors), maxe(errors))
+    errors = (syg_exp - 11 - syg_ml)[syg_var < 10]
+    print("*** MAE/RMSE/MaxE - Sygenta - ML to exp - 11 Hz offset - 10 Hz variance filter ***")
+    print(mae(errors), rmse(errors), maxe(errors))
+    errors = (syg_exp - 11 - syg_ml)[syg_var < 5]
+    print("*** MAE/RMSE/MaxE - Sygenta - ML to exp - 11 Hz offset - 5 Hz variance filter ***")
+    print(mae(errors), rmse(errors), maxe(errors))
+
+    errors = syg_exp - 11 - syg_dft
+    print("*** MAE/RMSE/MaxE - Sygenta - DFT to exp - 11 Hz offset - no variance filter ***")
+    print(mae(errors), rmse(errors), maxe(errors))
+    errors = (syg_exp - 11 - syg_dft)[syg_var < 10]
+    print("*** MAE/RMSE/MaxE - Sygenta - DFT to exp - 11 Hz offset - 10 Hz variance filter ***")
+    print(mae(errors), rmse(errors), maxe(errors))
+    errors = (syg_exp - 11 - syg_dft)[syg_var < 5]
+    print("*** MAE/RMSE/MaxE - Sygenta - DFT to exp - 11 Hz offset - 5 Hz variance filter ***")
+    print(mae(errors), rmse(errors), maxe(errors))
+
+    print("*** MOL/MAE/RMSE/MaxE - Strychnine - ML to exp - 11 Hz offset - no variance filter ***")
+    for mol in str_dft.keys():
+        errors = str_exp[1] - 11 - str_ml[mol]
+        print(mol, mae(errors), rmse(errors), maxe(errors))
+    print("*** MOL/MAE/RMSE/MaxE - Strychnine - ML to exp - 11 Hz offset - 10 Hz variance filter ***")
+    for mol in str_dft.keys():
+        errors = (str_exp[1] - 11 - str_ml[mol])[str_var[mol] < 10]
+        print(mol, mae(errors), rmse(errors), maxe(errors))
+    print("*** MOL/MAE/RMSE/MaxE - Strychnine - ML to exp - 11 Hz offset - 5 Hz variance filter ***")
+    for mol in str_dft.keys():
+        errors = (str_exp[1] - 11 - str_ml[mol])[str_var[mol] < 5]
+        print(mol, mae(errors), rmse(errors), maxe(errors))
+
+    print("*** MOL/MAE/RMSE/MaxE - Strychnine - DFT to exp - 11 Hz offset - no variance filter ***")
+    for mol in str_dft.keys():
+        errors = str_exp[1] - 11 - str_dft[mol]
+        print(mol, mae(errors), rmse(errors), maxe(errors))
+    print("*** MOL/MAE/RMSE/MaxE - Strychnine - DFT to exp - 11 Hz offset - 10 Hz variance filter ***")
+    for mol in str_dft.keys():
+        errors = (str_exp[1] - 11 - str_dft[mol])[str_var[mol] < 10]
+        print(mol, mae(errors), rmse(errors), maxe(errors))
+    print("*** MOL/MAE/RMSE/MaxE - Strychnine - DFT to exp - 11 Hz offset - 5 Hz variance filter ***")
+    for mol in str_dft.keys():
+        errors = (str_exp[1] - 11 - str_dft[mol])[str_var[mol] < 5]
+        print(mol, mae(errors), rmse(errors), maxe(errors))
+
+    for dist in ("laplace", "normal", "cauchy", "t"):
+        for scaling in True, False:
+            ml_model = ProbabilityModel(distribution=dist, scaling=scaling)
+            ml_model.fit(syg_exp, syg_ml, syg_var)
+            dft_model = ProbabilityModel(distribution=dist, scaling=scaling)
+            dft_model.fit(syg_exp, syg_dft)
+            print(dist, scaling, ml_model.bic, dft_model.bic, ml_model.aicc, dft_model.aicc)
     ml_model = ProbabilityModel(distribution='laplace', scaling=False)
-    ml_model.fit(syg_exp, syg_ml, variances)
+    ml_model.fit(syg_exp, syg_ml, syg_var)
     dft_model = ProbabilityModel(distribution='laplace', scaling=False)
     dft_model.fit(syg_exp, syg_dft)
 
@@ -424,20 +590,19 @@ def J1CH_results():
     print("*** Parameters - Sygenta - DFT to exp ***")
     print(dft_model.params)
 
-
     ml_ll = []
     print("*** mol/log-likelihood/ratio to 1 - Strychnine - ML to exp ***")
-    ll1 = ml_model.get_log_likelihood(str_exp[1], str_ml[1], str_variances[1])
+    ll1 = ml_model.get_log_likelihood(str_exp[1], str_ml[1], str_var[1])
     for mol in str_dft.keys():
-        ll = ml_model.get_log_likelihood(str_exp[1], str_ml[mol], str_variances[mol])
+        ll = ml_model.get_log_likelihood(str_exp[1], str_ml[mol], str_var[mol])
         ml_ll.append(ll)
         print(mol, ll, np.exp(ll1-ll))
 
     dft_ll = []
     print("*** mol/log-likelihood/ratio to 1 - Strychnine - DFT to exp ***")
-    ll1 = ml_model.get_log_likelihood(str_exp[1], str_dft[1])
+    ll1 = dft_model.get_log_likelihood(str_exp[1], str_dft[1])
     for mol in str_dft.keys():
-        ll = ml_model.get_log_likelihood(str_exp[1], str_dft[mol])
+        ll = dft_model.get_log_likelihood(str_exp[1], str_dft[mol])
         dft_ll.append(ll)
         print(mol, ll, np.exp(ll1-ll))
 
