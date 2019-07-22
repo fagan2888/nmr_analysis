@@ -142,6 +142,11 @@ def mean_duplicates(data, duplicates):
             data_unique[mol] = data[mol]
     return data_unique
 
+#class _Distribution(object):
+#    """
+#    Class to handle probability distribution internals
+#    """
+
 class ProbabilityModel(object):
     """
     Class to handle fitting probability distributions
@@ -209,6 +214,23 @@ class ProbabilityModel(object):
 
         return ll
 
+    def _get_cdf(self, x, loc, scale, df=None):
+        """
+        Because scipy stats is slooow
+        """
+        if self.distribution == "cauchy":
+            cdf = 1/np.pi * np.atan(abs(x-loc)/scale) + 0.5
+        elif self.distribution == "normal":
+            cdf = 0.5*(1 + scipy.special.erf(abs(x-loc)/(scale*np.sqrt(2))))
+        elif self.distribution == "laplace":
+                cdf = 1 - 0.5 * np.exp(- abs(x - loc) / scale)
+        elif self.distribution == "t":
+            cdf = 0.5 * x * scipy.special.gamma((df+1)/2) * scipy.special.hyp2f1(0.5,(df+1)/2,1.5,-(((x-loc)/scale)**2)/df) / \
+                    (np.sqrt(np.pi * df) * scipy.special.gamma(df/2))
+
+        assert np.all(cdf >= 0)
+        assert np.all(cdf <= 1)
+        return cdf
 
     def _loss_function(self, x, labels, predictions, variances=None):
         """
@@ -425,7 +447,45 @@ class ProbabilityModel(object):
 
         return -negative_log_likelihood
 
+    def get_log_dp4(self, labels, predictions, variances=None):
+        """
+        Get the sum of log(1-CDF) as per the DP4 paper.
+        """
+        if self.params is None:
+            raise SystemExit("Model has not been fitted")
+        elif variances is None and self._variances_fitted:
+            raise SystemExit("Variances has to be fitted to be able to used to get log-likelihood")
+        elif variances is not None and not self._variances_fitted:
+            raise SystemExit("Variances was fitted, so is also needed to get log-likelihood")
 
+        x = self.params
+        n = len(labels)
+        loc = x[0]
+        if self._variances_fitted:
+            a = np.exp(x[1])
+            b = x[2]
+        else:
+            scale = np.exp(x[1])
+        if self.distribution == "t":
+            df = np.exp(x[2 + int(self._variances_fitted)])
+        else:
+            df = None
+        if self.scaling:
+            slope = x[-1]
+        else:
+            slope = 1
+
+        errors = labels - slope * predictions
+
+        if self._variances_fitted:
+            log_dp4 = 0
+            for i in range(n):
+                scale = a * variances[i]**b
+                log_dp4 += np.log(1-self._get_cdf(errors[i], loc, scale, df))
+        else:
+            log_dp4 = sum(np.log(1-self._get_cdf(errors, loc, scale, df)))
+
+        return log_dp4
 
 def mae(x):
     """
@@ -924,82 +984,130 @@ def C13_results(distribution='laplace'):
 #            quit()
 
 
-def get_probability_of_true_models(ml_models, dft_models, str_exps, str_dfts, str_mls, str_vars, n=int(1e6)):
+#def get_probability_of_true_models(ml_models, dft_models, str_exps, str_dfts, str_mls, str_vars, n=int(1e6)):
+#    """
+#    Get the probabilities of a model actually being the best one and not just a fluke.
+#    This is done numerically, by counting how often two similar models would result in the
+#    same likelihood ratio as observed. 
+#    """
+#
+#    n_models = len(ml_models)
+#    n_samples = [len(d[1]) for d in str_exps]
+#
+#
+#    # Get likelihoods for the different models
+#    ml_likelihoods = {}
+#    dft_likelihoods = {}
+#    for mol in str_dfts[0]:
+#        ml_likelihoods[mol] = 0
+#        dft_likelihoods[mol] = 0
+#        for i in range(n_models):
+#            # Get likelihoods for the model that we assume is the true one
+#            ml_likelihoods[mol] += ml_models[i].get_log_likelihood(str_exps[i][1], str_mls[i][mol], str_vars[i][mol])
+#            dft_likelihoods[mol] += dft_models[i].get_log_likelihood(str_exps[i][1], str_dfts[i][mol])
+#
+#    # Draw samples
+#    ml_ll = {}
+#    dft_ll = {}
+#    for mol in str_dfts[0]:
+#        ml_ll[mol] = 0
+#        dft_ll[mol] = 0
+#        for i in range(n_models):
+#            for j in range(n_samples[i]):
+#                ml_ll[mol] += ml_models[i].get_sample_likelihoods(str_vars[i][mol][j],n=n)
+#                dft_ll[mol] += dft_models[i].get_sample_likelihoods(n=n)
+#
+#    # Calculate probability of true model
+#    for mol1 in str_dfts[0]:
+#        llr_observed = dft_likelihoods[mol1] - np.log(sum(np.exp(ll) for ll in dft_likelihoods.values()))
+#        #p_sampled = np.exp(dft_ll[mol])
+#        p_data = 0
+#        for mol2 in str_dfts[0]:
+#            if mol1 == mol2:
+#                p_data += np.exp(dft_likelihoods[mol2])
+#                continue
+#            p_data += np.exp(dft_ll[mol2])
+#        llr_sampled = dft_likelihoods[mol1] - np.log(p_data)
+#        print(llr_observed, llr_sampled[:5])
+#        print(sum(llr_observed > llr_sampled))
+#        quit()
+#
+#
+#
+#    quit()
+
+def get_probability_of_true_models(ml_models, dft_models, str_exps, str_dfts, str_mls, str_vars, method="dp4"):
     """
-    Get the probabilities of a model actually being the best one and not just a fluke.
-    This is done numerically, by counting how often two similar models would result in the
-    same likelihood ratio as observed. 
+    Get the probabilities of a model actually being the best one and not just a fluke, using the DP4 approach.
     """
 
     n_models = len(ml_models)
     n_samples = [len(d[1]) for d in str_exps]
 
-
-    # Get likelihoods for the different models
-    ml_likelihoods = {}
-    dft_likelihoods = {}
+    # Get log numerator for the different models
+    ml_num = {}
+    dft_num = {}
     for mol in str_dfts[0]:
-        ml_likelihoods[mol] = 0
-        dft_likelihoods[mol] = 0
+        ml_num[mol] = 0
+        dft_num[mol] = 0
         for i in range(n_models):
             # Get likelihoods for the model that we assume is the true one
-            ml_likelihoods[mol] += ml_models[i].get_log_likelihood(str_exps[i][1], str_mls[i][mol], str_vars[i][mol])
-            dft_likelihoods[mol] += dft_models[i].get_log_likelihood(str_exps[i][1], str_dfts[i][mol])
+            if method == "pdf":
+                ml_num[mol] += ml_models[i].get_log_likelihood(str_exps[i][1], str_mls[i][mol], str_vars[i][mol])
+                dft_num[mol] += dft_models[i].get_log_likelihood(str_exps[i][1], str_dfts[i][mol])
+            elif method == "dp4":
+                ml_num[mol] += ml_models[i].get_log_dp4(str_exps[i][1], str_mls[i][mol], str_vars[i][mol])
+                dft_num[mol] += dft_models[i].get_log_dp4(str_exps[i][1], str_dfts[i][mol])
+            else:
+                raise SystemExit("wrong method")
 
-    # Draw samples
-    ml_ll = {}
-    dft_ll = {}
-    for mol in str_dfts[0]:
-        ml_ll[mol] = 0
-        dft_ll[mol] = 0
-        for i in range(n_models):
-            for j in range(n_samples[i]):
-                ml_ll[mol] += ml_models[i].get_sample_likelihoods(str_vars[i][mol][j],n=n)
-                dft_ll[mol] += dft_models[i].get_sample_likelihoods(n=n)
 
     # Calculate probability of true model
+    dft_denom = np.log(sum(np.exp(num) for num in dft_num.values()))
+    ml_denom = np.log(sum(np.exp(num) for num in ml_num.values()))
     for mol1 in str_dfts[0]:
-        llr_observed = dft_likelihoods[mol1] - np.log(sum(np.exp(ll) for ll in dft_likelihoods.values()))
-        #p_sampled = np.exp(dft_ll[mol])
-        p_data = 0
-        for mol2 in str_dfts[0]:
-            if mol1 == mol2:
-                p_data += np.exp(dft_likelihoods[mol2])
-                continue
-            p_data += np.exp(dft_ll[mol2])
-        llr_sampled = dft_likelihoods[mol1] - np.log(p_data)
-        print(llr_observed, llr_sampled[:5])
-        print(sum(llr_observed > llr_sampled))
-        quit()
-
-
-
-    quit()
-
-
-
+        dft_log_posterior = dft_num[mol1] - dft_denom
+        dft_posterior = np.exp(dft_log_posterior)
+        ml_log_posterior = ml_num[mol1] - ml_denom
+        ml_posterior = np.exp(ml_log_posterior)
+        print(mol1, dft_posterior, ml_posterior)
 
 
 
 if __name__ == "__main__":
-    j_ml_model, j_dft_model, j_str_exp, j_str_dft, j_str_ml, j_str_var = J1CH_results()
-    h_ml_model, h_dft_model, h_str_exp, h_str_dft, h_str_ml, h_str_var = H1_results()
-    c_ml_model, c_dft_model, c_str_exp, c_str_dft, c_str_ml, c_str_var = C13_results()
+    j_ml_model, j_dft_model, j_str_exp, j_str_dft, j_str_ml, j_str_var = J1CH_results("normal")
+    h_ml_model, h_dft_model, h_str_exp, h_str_dft, h_str_ml, h_str_var = H1_results("normal")
+    c_ml_model, c_dft_model, c_str_exp, c_str_dft, c_str_ml, c_str_var = C13_results("normal")
+    print("joint")
     get_probability_of_true_models([j_ml_model,h_ml_model,c_ml_model],
                                    [j_dft_model,h_dft_model,c_dft_model],
                                    [j_str_exp,h_str_exp,c_str_exp],
                                    [j_str_dft,h_str_dft,c_str_dft],
                                    [j_str_ml,h_str_ml,c_str_ml],
-                                   [j_str_var, h_str_var, c_str_var], n=100000)
+                                   [j_str_var, h_str_var, c_str_var])
+    print("j-only")
+    get_probability_of_true_models([j_ml_model],
+                                   [j_dft_model],
+                                   [j_str_exp],
+                                   [j_str_dft],
+                                   [j_str_ml],
+                                   [j_str_var])
+    print("h-only")
+    get_probability_of_true_models([h_ml_model],
+                                   [h_dft_model],
+                                   [h_str_exp],
+                                   [h_str_dft],
+                                   [h_str_ml],
+                                   [h_str_var])
+    print("c-only")
+    get_probability_of_true_models([c_ml_model],
+                                   [c_dft_model],
+                                   [c_str_exp],
+                                   [c_str_dft],
+                                   [c_str_ml],
+                                   [c_str_var])
     quit()
-    print("*** mol/ll_ratio to 1 - combined data - Strychnine - ML to exp")
-    for mol in j_ml_ll:
-        print(mol, np.exp(j_ml_ll[1]+h_ml_ll[1]+c_ml_ll[1] - j_ml_ll[mol]-h_ml_ll[mol]-c_ml_ll[mol]))
-    print("*** mol/ll_ratio to 1 - combined data - Strychnine - DFT to exp")
-    for mol in j_ml_ll:
-        print(mol, np.exp(j_dft_ll[1]+h_dft_ll[1]+c_dft_ll[1] - j_dft_ll[mol]-h_dft_ll[mol]-c_dft_ll[mol]))
 
-    quit()
     labels, predictions, variances = read_nmr("__JUL03___CD_exp_CCS_raw.txt", -1)
     P = ProbabilityModel(distribution='laplace', scaling=True)
     P.fit(labels, predictions, variances)
